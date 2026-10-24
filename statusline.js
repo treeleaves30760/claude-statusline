@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Claude Code status line: model | folder + git branch | context | 5h usage | weekly usage + pace
+// Claude Code status line (2 lines):
+//   model · effort · thinking ⚡ | folder + git branch | session cost · time · lines | prompt cache
+//   context | 5h usage | weekly usage + pace
 // Usage:
 //   node statusline.js            read status JSON from stdin, print the line (called by Claude Code)
 //   node statusline.js --install  register this file as statusLine in ~/.claude/settings.json
@@ -67,7 +69,7 @@ function weeklyPace(used, resetsAt) {
   const WEEK = 7 * 86400;
   const remain = toSec(resetsAt) - Date.now() / 1000;
   const elapsed = WEEK - remain;
-  if (!resetsAt || remain <= 0 || elapsed < 3600 || used <= 0) return '';
+  if (!resetsAt || remain <= 0 || elapsed < 86400 || used <= 0) return '';
   const rate = used / elapsed;
   const projected = used + rate * remain;
   if (projected < 100) return ` ${c.dim}→${c.reset}${color(projected)}${Math.round(projected)}%${c.reset}`;
@@ -75,22 +77,49 @@ function weeklyPace(used, resetsAt) {
   return ` ${c.red}⚠ ${dur(runOut)}後用完${c.reset}`;
 }
 
+const tokens = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1000)}k`);
+
 function render(input) {
   let d = {};
   try { d = JSON.parse(input); } catch {}
-  const parts = [];
+  const sep = `${c.dim} │ ${c.reset}`;
+  const dot = `${c.dim} · ${c.reset}`;
 
-  if (d.model?.display_name) parts.push(`${c.cyan}${d.model.display_name}${c.reset}`);
+  // Line 1: model + effort, folder + branch, session cost/time/lines, prompt cache
+  const top = [];
+  const model = [];
+  if (d.model?.display_name) model.push(`${c.cyan}${d.model.display_name}${c.reset}`);
+  if (d.effort?.level) model.push(d.effort.level);
+  if (d.thinking?.enabled) model.push('thinking');
+  if (model.length) top.push(model.join(dot) + (d.fast_mode ? ` ${c.yellow}⚡${c.reset}` : ''));
 
   const cwd = d.workspace?.current_dir || d.cwd;
   if (cwd) {
     const branch = gitBranch(cwd);
-    parts.push(`${c.blue}${path.basename(cwd) || cwd}${c.reset}` + (branch ? ` ${c.magenta}⎇ ${branch}${c.reset}` : ''));
+    top.push(`${c.blue}${path.basename(cwd) || cwd}${c.reset}` + (branch ? ` ${c.magenta}⎇ ${branch}${c.reset}` : ''));
   }
 
+  const cost = d.cost || {};
+  const session = [];
+  if (cost.total_cost_usd != null) session.push(`${c.yellow}$${cost.total_cost_usd.toFixed(2)}${c.reset}`);
+  if (cost.total_duration_ms != null) session.push(dur(cost.total_duration_ms / 1000));
+  if (cost.total_lines_added != null || cost.total_lines_removed != null)
+    session.push(`${c.green}+${cost.total_lines_added || 0}${c.reset}/${c.red}-${cost.total_lines_removed || 0}${c.reset}`);
+  if (session.length) top.push(session.join(dot));
+
+  const pc = d.prompt_cache;
+  if (pc?.hit_ratio != null) {
+    const left = pc.expires_at ? toSec(pc.expires_at) - Date.now() / 1000 : 0;
+    const ttl = pc.warm && left > 0 ? ` ${c.dim}(${dur(left)})${c.reset}` : ` ${c.dim}(cold)${c.reset}`;
+    const hit = pc.hit_ratio * 100;
+    top.push(`cache ${hit >= 80 ? c.green : hit >= 50 ? c.yellow : c.red}${Math.round(hit)}%${c.reset}${ttl}`);
+  }
+
+  // Line 2: context window and usage limits
+  const parts = [];
   const cw = d.context_window;
   if (cw?.used_percentage != null) {
-    const size = cw.context_window_size ? `${c.dim}/${Math.round(cw.context_window_size / 1000)}k${c.reset}` : '';
+    const size = cw.context_window_size ? `${c.dim}/${tokens(cw.context_window_size)}${c.reset}` : '';
     parts.push(`ctx ${bar(cw.used_percentage)} ${pct(cw.used_percentage)}${size}`);
   }
 
@@ -105,5 +134,5 @@ function render(input) {
   if (wk?.used_percentage != null)
     parts.push(`week ${bar(wk.used_percentage)} ${pct(wk.used_percentage)}${reset(wk.resets_at)}${weeklyPace(wk.used_percentage, wk.resets_at)}`);
 
-  return parts.join(`${c.dim} │ ${c.reset}`);
+  return [top.join(sep), parts.join(sep)].filter(Boolean).join('\n');
 }
